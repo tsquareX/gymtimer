@@ -27,7 +27,8 @@ clean:
 	rm -f *.o *.bin
 
 test: gymtimer.bin
-	sudo ./gymtimer.bin --led-rows=64 --led-cols=64 -f fonts/gohufont-11.bdf
+	sudo setcap 'cap_sys_nice=eip' gymtimer.bin
+	./gymtimer.bin --led-rows=64 --led-cols=64 -f fonts/gohufont-11.bdf
 
 atest: atest.bin
 	./atest.bin  44100 2 1 < Korg-M3R-High-Wood-Block.wav

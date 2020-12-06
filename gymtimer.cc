@@ -22,7 +22,7 @@ using namespace rgb_matrix;
 
 #define WAV_FN "Korg-M3R-High-Wood-Block.wav"
 #define PCM_DEVICE "default"
-#define BDF_FONT_FILE "fonts/gohufont-11.bdf"
+#define BDF_FONT_FILE "fonts/teletactile.bdf"
 #define BUTTON_1_PIN 10 /* MOSI */
 #define BUTTON_2_PIN 9 /* MISO */
 
@@ -35,12 +35,15 @@ static 	snd_pcm_t *m_pcm_handle = NULL;
 static unsigned int m_rate = 44100;
 static const unsigned m_channels = 2;
 static snd_pcm_uframes_t m_nframes = 0;
+static rgb_matrix::Font m_font;
+static RGBMatrix* m_matrix = NULL;
+static unsigned char* m_wavbuf = NULL;
 
 static void init_gpio(void);
 static RGBMatrix* init_matrix(void);
 static void timespec_diff(struct timespec *start, struct timespec *stop, struct timespec *result);
 
-
+static void load_font(void);
 static void init_sound(void);
 static void shutdown_sound(void);
 static int get_file_sz(FILE* fd);
@@ -48,11 +51,6 @@ static unsigned char* get_wavfile(const char* wav_fn);
 static void play_tick(void);
 static void start_interval_timer(void);
 static void install_sigint_handler(void);
-
-
-
-
-
 
 
 static void sigint_handler(int signum) {
@@ -89,11 +87,9 @@ static RGBMatrix* init_matrix(void) {
   matrix_options.rows = 64;
   matrix_options.cols = 64;
 
-  RGBMatrix *m = rgb_matrix::CreateMatrixFromOptions(matrix_options,
-                                                     runtime_opt);
-
+  RGBMatrix *m = rgb_matrix::CreateMatrixFromOptions(matrix_options, runtime_opt);
   m->SetPWMBits(1); //1 seems ok?  May need more for colors??
-  
+
   return m;
 }
 
@@ -118,13 +114,21 @@ static void update_counter(unsigned int seconds, RGBMatrix* matrix, rgb_matrix::
 
   char seconds_text[16];
   sprintf(seconds_text, "%5u", seconds);
-  rgb_matrix::DrawText(matrix, font, SECONDS_X, SECONDS_Y + font.baseline(),
+  // Draw seconds
+  rgb_matrix::DrawText(matrix, font, SECONDS_X-10, SECONDS_Y + font.baseline(),
                         fg_color, &bg_color, seconds_text,
                         letter_spacing);
+
+	  const int width = m_matrix->width() - 1;
+	  const int height = m_matrix->height() - 1;
+	  // Borders
+	  DrawLine(m_matrix, 0, 0, width, 0, Color(255, 0, 0));
+
 }
 
 static void shutdown_sound(void) {
 	snd_pcm_close(m_pcm_handle);
+	free(m_wavbuf);
 }
 
 static int get_file_sz(FILE* fd) {
@@ -152,14 +156,13 @@ static unsigned char* get_wavfile(const char* wav_fn) {
 	return buf;
 }
 static void play_tick(void) {
-	unsigned char* wavbuf = get_wavfile(WAV_FN);
+	snd_pcm_wait(m_pcm_handle, 2000);
 	snd_pcm_prepare(m_pcm_handle);
-	snd_pcm_writei (m_pcm_handle, wavbuf, m_nframes);
-	free(wavbuf);
+	snd_pcm_writei (m_pcm_handle, m_wavbuf, m_nframes/2);
 }
 
 void init_sound(void) {
-	snd_pcm_hw_params_t *params = NULL;
+	snd_pcm_hw_params_t *params;
 
 	int err = snd_pcm_open(&m_pcm_handle, PCM_DEVICE,	SND_PCM_STREAM_PLAYBACK, 0);
 	if(err <0) printf("ERROR: Can't open \"%s\" PCM device. %s\n", PCM_DEVICE, snd_strerror(err));
@@ -182,35 +185,17 @@ void init_sound(void) {
 
 	err = snd_pcm_hw_params(m_pcm_handle, params);
 	if(err<0) printf("ERROR: Can't set harware parameters. %s\n", snd_strerror(err));
-}
-
-void clock_exec(RGBMatrix* matrix) {
-  static const time_t MAX_SECONDS_DISP=1000;
-  
-  rgb_matrix::Font font;
-  if (!font.LoadFont(BDF_FONT_FILE)) {
-    fprintf(stderr, "Couldn't load font '%s'\n", BDF_FONT_FILE);
-    return;
-  }
-
-  timespec starttime;
-  clock_gettime(CLOCK_MONOTONIC, &starttime);
-
-  timespec curtime;
-  timespec difftime;
-  while(!stop_val) {
-    clock_gettime(CLOCK_MONOTONIC, &curtime);
-    timespec_diff(&starttime, &curtime, &difftime);
-    time_t seconds = difftime.tv_sec < MAX_SECONDS_DISP ? difftime.tv_sec : difftime.tv_sec % MAX_SECONDS_DISP;
-    update_counter(seconds, matrix, font);
-  }
+	
+	m_wavbuf = get_wavfile(WAV_FN);
 }
 
 
 void timer_handler (int signum)
 {
- static int count = 0;
- printf ("timer expired %d times\n", ++count);
+ static int count = 1;
+ update_counter(count, m_matrix, m_font);
+ play_tick();
+ count++;
 }
 
 static void start_interval_timer(void) {
@@ -226,10 +211,8 @@ static void start_interval_timer(void) {
 	/* ... and every 1000 msec after that. */
 	timer.it_interval.tv_sec = 1;
 	timer.it_interval.tv_usec = 0;
-	errno=0;
-	int x = setitimer (ITIMER_REAL, &timer, NULL);
-	printf("timer started=%d errno=%d %s\n", x, errno, strerror(errno));
-
+	
+	setitimer (ITIMER_REAL, &timer, NULL);
 }
 
 static void install_sigint_handler(void) {
@@ -239,25 +222,32 @@ static void install_sigint_handler(void) {
 	sigaction(SIGINT, &sa, NULL);
 }
 
+static void load_font(void) {
+	if (!m_font.LoadFont(BDF_FONT_FILE)) fprintf(stderr, "Couldn't load font '%s'\n", BDF_FONT_FILE);
+}
+
 int main(int argc, char *argv[]) {
-	install_sigint_handler();
+  install_sigint_handler();
 
-  init_gpio();
-  RGBMatrix* matrix = init_matrix();
-  assert(matrix);
-
+  //init_gpio();
+  m_matrix = init_matrix();
+  assert(m_matrix);
+  
+  load_font();
   init_sound();
   start_interval_timer();
-  //clock_exec(matrix);
   
+  play_tick();
+  while(!stop_val) {}
+
   // Finished. Shut down the RGB matrix.
   printf("Shut 'er down\n");
-  matrix->Clear();
-  delete matrix;
-  gpioTerminate();
 
+  m_matrix->Clear();
+  delete m_matrix;
+
+  //gpioTerminate();
   shutdown_sound();
 
-  while(!stop_val) {}
   return EXIT_SUCCESS;
 }
